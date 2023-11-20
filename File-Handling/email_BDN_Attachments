@@ -1,0 +1,150 @@
+DATA: lt_attach    TYPE solix_tab,
+          lt_mailbody  TYPE soli_tab,
+          lv_string    TYPE string,
+          lv_size      TYPE so_obj_len,
+          lv_rows      TYPE i,
+          lv_length    TYPE so_obj_len,
+
+          lo_sendreq   TYPE REF TO cl_bcs,
+          lo_doc       TYPE REF TO cl_document_bcs,
+          lo_sender    TYPE REF TO cl_sapuser_bcs,
+          lo_dist      TYPE REF TO cl_distributionlist_bcs,
+          lo_email     TYPE REF TO cl_cam_address_bcs,
+          lo_recipient TYPE REF TO if_recipient_bcs,
+          lv_url       TYPE string.
+
+    DATA lv_object_key TYPE sbdst_object_key.
+    DATA lt_content TYPE sbdst_content.
+    DATA data_xstring  TYPE xstring.
+    DATA lv_bin_length TYPE i.
+    DATA lt_word_doc TYPE TABLE OF solix.
+    DATA lt_att_head TYPE soli_tab.
+
+    SELECT SINGLE zcode3
+           FROM zca_gbl_params
+           INTO lv_url
+           WHERE zgid = gc_zgid
+           AND   zcode1 = gc_fiori_url
+           AND   zcode2 = sy-sysid.
+
+*    lv_url = |https://fiori.nextgen.com|. "knm01
+
+*   Email body
+    CLEAR: lt_mailbody.
+    lt_mailbody = VALUE #( ( line = |<html><body>| )
+                           ( line = |Please see the attached document| )
+                           ( line = |<br>| )                           
+                           ( line = '</body> </html>' ) ).
+
+    IF lt_mailbody IS NOT INITIAL.
+
+      TRY.
+*         Create persistent send request
+          lo_sendreq = cl_bcs=>create_persistent( ).
+
+*         Create Document
+          DESCRIBE TABLE lt_mailbody LINES lv_rows.
+          lv_rows = lv_rows * 255.
+          MOVE lv_rows TO lv_length.
+
+          lo_doc = cl_document_bcs=>create_document(
+          i_type         = 'HTM'
+          i_subject      = 'Login Instructions'
+          i_length       = lv_length
+          i_text         = lt_mailbody ).
+
+*         Read word document
+          CALL METHOD cl_bds_document_set=>get_with_table
+            EXPORTING
+              classname       = |PICTURES|
+              classtype       = |OT|
+              object_key      = |ZLOGIN_INSTRUCTIONS|
+            CHANGING
+              content         = lt_content
+            EXCEPTIONS
+              error_kpro      = 1
+              internal_error  = 2
+              nothing_found   = 3
+              no_content      = 4
+              parameter_error = 5
+              not_authorized  = 6
+              not_allowed     = 7
+              OTHERS          = 8.
+          IF sy-subrc <> 0.
+            ep_message-type = zgc_char_e.
+            ep_message-message = |Error reading attachment details|.
+          ENDIF.
+
+          DESCRIBE TABLE lt_content LINES DATA(lv_lines).
+          lv_bin_length = lv_lines * 1022.
+
+*         convert from RAW1022 to RAW255
+          CALL FUNCTION 'SCMS_BINARY_TO_XSTRING'
+            EXPORTING
+              input_length = lv_bin_length
+            IMPORTING
+              buffer       = data_xstring
+            TABLES
+              binary_tab   = lt_content
+            EXCEPTIONS
+              failed       = 1
+              OTHERS       = 2.
+
+*         convert from RAW1022 to RAW255
+          CALL FUNCTION 'SCMS_XSTRING_TO_BINARY'
+            EXPORTING
+              buffer        = data_xstring
+            IMPORTING
+              output_length = lv_bin_length
+            TABLES
+              binary_tab    = lt_word_doc.
+
+          lt_att_head = VALUE #( ( line = '&SO_FILENAME=Login instructions Entry.docx' ) ).
+
+          lo_doc->add_attachment(
+                    i_attachment_type    = 'doc'            "#EC NOTEXT
+                    i_attachment_subject = 'Login instructions' "#EC NOTEXT
+                    i_att_content_hex    = lt_word_doc
+                    i_attachment_header = lt_att_head ).
+
+*         Add document to send request
+          CALL METHOD lo_sendreq->set_document( lo_doc ).
+
+*         Get sender object
+          lo_sender = cl_sapuser_bcs=>create( sy-uname ).
+
+*         Add sender
+          CALL METHOD lo_sendreq->set_sender
+            EXPORTING
+              i_sender = lo_sender.
+
+*         Email recipient
+          lo_email =  cl_cam_address_bcs=>create_internet_address( ip_email ).
+          lo_recipient = lo_email.
+
+*         Add recipient with its respective attributes to send request
+          CALL METHOD lo_sendreq->add_recipient
+            EXPORTING
+              i_recipient  = lo_recipient
+              i_express    = ' '
+              i_copy       = ' '
+              i_blind_copy = 'X'.
+
+*         Send document
+          CALL METHOD lo_sendreq->send( ).
+
+          COMMIT WORK.
+          IF sy-subrc = 0.
+            ep_message-type = zgc_char_s.
+            ep_message-message = |Login instructions sent to user with credentials|.
+          ENDIF.
+
+        CATCH cx_document_bcs
+              cx_send_req_bcs
+              cx_address_bcs
+          INTO DATA(lo_excp).
+          ep_message-type = zgc_char_e.
+          ep_message-message = |Error sending Login instructions|.
+      ENDTRY.
+
+    ENDIF.
